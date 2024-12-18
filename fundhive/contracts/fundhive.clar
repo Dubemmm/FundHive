@@ -8,6 +8,8 @@
 (define-constant ERR-PROJECT-ENDED (err u105))
 (define-constant ERR-DEADLINE-PASSED (err u106))
 (define-constant ERR-NO-REFUND-AVAILABLE (err u107))
+(define-constant ERR-INVALID-PROJECT (err u108))
+(define-constant ERR-INVALID-MILESTONE (err u109))
 
 ;; Data maps
 (define-map projects 
@@ -19,8 +21,8 @@
         end-block: uint,
         milestone-count: uint,
         is-active: bool,
-        last-milestone-deadline: uint,  ;; New field for tracking milestone deadlines
-        total-milestones-completed: uint  ;; New field for progress tracking
+        last-milestone-deadline: uint,
+        total-milestones-completed: uint
     }
 )
 
@@ -31,8 +33,8 @@
         amount: uint,
         completed: bool,
         released: bool,
-        deadline: uint,  ;; New field for milestone deadline
-        completion-block: uint  ;; New field for tracking completion timestamp
+        deadline: uint,
+        completion-block: uint
     }
 )
 
@@ -40,11 +42,10 @@
     { project-id: uint, contributor: principal }
     { 
         amount: uint,
-        refunded: bool  ;; New field to track refund status
+        refunded: bool
     }
 )
 
-;; Progress tracking
 (define-map project-progress
     { project-id: uint }
     {
@@ -56,6 +57,20 @@
 
 ;; Project counter
 (define-data-var project-counter uint u0)
+
+;; Helper functions for validation
+(define-private (is-valid-project (project-id uint))
+    (is-some (map-get? projects { project-id: project-id }))
+)
+
+(define-private (is-valid-milestone (project-id uint) (milestone-id uint))
+    (and
+        (is-valid-project project-id)
+        (let ((project (unwrap! (map-get? projects { project-id: project-id }) false)))
+            (<= milestone-id (get milestone-count project))
+        )
+    )
+)
 
 ;; Administrative Functions
 (define-public (create-project (target-amount uint) (end-block uint) (milestone-count uint) (milestone-deadline uint))
@@ -82,7 +97,6 @@
             }
         )
         
-        ;; Initialize progress tracking
         (map-set project-progress
             { project-id: project-id }
             {
@@ -102,8 +116,10 @@
         (
             (project (unwrap! (map-get? projects { project-id: project-id }) ERR-NOT-FOUND))
         )
+        ;; Input validation
+        (asserts! (is-valid-project project-id) ERR-INVALID-PROJECT)
+        (asserts! (is-valid-milestone project-id milestone-id) ERR-INVALID-MILESTONE)
         (asserts! (is-eq (get owner project) tx-sender) ERR-NOT-AUTHORIZED)
-        (asserts! (<= milestone-id (get milestone-count project)) ERR-INVALID-AMOUNT)
         (asserts! (> amount u0) ERR-INVALID-AMOUNT)
         (asserts! (>= deadline block-height) ERR-INVALID-AMOUNT)
         
@@ -122,23 +138,21 @@
     )
 )
 
-;; Contribution Functions
 (define-public (contribute (project-id uint))
     (let
         (
             (project (unwrap! (map-get? projects { project-id: project-id }) ERR-NOT-FOUND))
             (contribution-amount (stx-get-balance tx-sender))
-            (current-progress (default-to 
-                { funds-released: u0, total-contributors: u0, last-milestone-completion: u0 }
-                (map-get? project-progress { project-id: project-id })))
+            (current-progress (unwrap! (map-get? project-progress { project-id: project-id }) ERR-NOT-FOUND))
         )
+        ;; Input validation
+        (asserts! (is-valid-project project-id) ERR-INVALID-PROJECT)
         (asserts! (get is-active project) ERR-PROJECT-ENDED)
         (asserts! (<= block-height (get end-block project)) ERR-PROJECT-ENDED)
         (asserts! (> contribution-amount u0) ERR-INVALID-AMOUNT)
         
         (try! (stx-transfer? contribution-amount tx-sender (as-contract tx-sender)))
         
-        ;; Update contribution record
         (map-set contributions
             { project-id: project-id, contributor: tx-sender }
             { 
@@ -147,7 +161,6 @@
             }
         )
         
-        ;; Update project and progress tracking
         (map-set projects
             { project-id: project-id }
             (merge project { current-amount: (+ (get current-amount project) contribution-amount) })
@@ -162,22 +175,21 @@
     )
 )
 
-;; Milestone Management
 (define-public (complete-milestone (project-id uint) (milestone-id uint))
     (let
         (
             (project (unwrap! (map-get? projects { project-id: project-id }) ERR-NOT-FOUND))
             (milestone (unwrap! (map-get? milestones { project-id: project-id, milestone-id: milestone-id }) ERR-NOT-FOUND))
-            (current-progress (default-to 
-                { funds-released: u0, total-contributors: u0, last-milestone-completion: u0 }
-                (map-get? project-progress { project-id: project-id })))
+            (current-progress (unwrap! (map-get? project-progress { project-id: project-id }) ERR-NOT-FOUND))
         )
+        ;; Input validation
+        (asserts! (is-valid-project project-id) ERR-INVALID-PROJECT)
+        (asserts! (is-valid-milestone project-id milestone-id) ERR-INVALID-MILESTONE)
         (asserts! (get is-active project) ERR-PROJECT-ENDED)
         (asserts! (is-eq (get owner project) tx-sender) ERR-NOT-AUTHORIZED)
         (asserts! (not (get completed milestone)) ERR-MILESTONE-NOT-COMPLETED)
         (asserts! (<= block-height (get deadline milestone)) ERR-DEADLINE-PASSED)
         
-        ;; Update milestone completion
         (map-set milestones
             { project-id: project-id, milestone-id: milestone-id }
             (merge milestone { 
@@ -186,7 +198,6 @@
             })
         )
         
-        ;; Update project progress
         (map-set projects
             { project-id: project-id }
             (merge project { 
@@ -208,17 +219,17 @@
         (
             (project (unwrap! (map-get? projects { project-id: project-id }) ERR-NOT-FOUND))
             (milestone (unwrap! (map-get? milestones { project-id: project-id, milestone-id: milestone-id }) ERR-NOT-FOUND))
-            (current-progress (default-to 
-                { funds-released: u0, total-contributors: u0, last-milestone-completion: u0 }
-                (map-get? project-progress { project-id: project-id })))
+            (current-progress (unwrap! (map-get? project-progress { project-id: project-id }) ERR-NOT-FOUND))
         )
+        ;; Input validation
+        (asserts! (is-valid-project project-id) ERR-INVALID-PROJECT)
+        (asserts! (is-valid-milestone project-id milestone-id) ERR-INVALID-MILESTONE)
         (asserts! (get is-active project) ERR-PROJECT-ENDED)
         (asserts! (get completed milestone) ERR-MILESTONE-NOT-COMPLETED)
         (asserts! (not (get released milestone)) ERR-MILESTONE-NOT-COMPLETED)
         
         (try! (as-contract (stx-transfer? (get amount milestone) tx-sender (get owner project))))
         
-        ;; Update milestone and progress tracking
         (map-set milestones
             { project-id: project-id, milestone-id: milestone-id }
             (merge milestone { released: true })
@@ -235,7 +246,6 @@
     )
 )
 
-;; Refund Functions
 (define-public (claim-refund (project-id uint))
     (let
         (
@@ -243,17 +253,16 @@
             (contribution (unwrap! (map-get? contributions { project-id: project-id, contributor: tx-sender }) ERR-NOT-FOUND))
             (last-milestone (unwrap! (map-get? milestones { project-id: project-id, milestone-id: (get milestone-count project) }) ERR-NOT-FOUND))
         )
-        ;; Check if refund is available (missed deadline or project failed)
+        ;; Input validation
+        (asserts! (is-valid-project project-id) ERR-INVALID-PROJECT)
         (asserts! (or
             (> block-height (get last-milestone-deadline project))
             (> block-height (get deadline last-milestone))
         ) ERR-NO-REFUND-AVAILABLE)
         (asserts! (not (get refunded contribution)) ERR-NO-REFUND-AVAILABLE)
         
-        ;; Process refund
         (try! (as-contract (stx-transfer? (get amount contribution) tx-sender tx-sender)))
         
-        ;; Mark contribution as refunded
         (map-set contributions
             { project-id: project-id, contributor: tx-sender }
             (merge contribution { refunded: true })
